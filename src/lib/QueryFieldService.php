@@ -6,19 +6,16 @@
  */
 namespace Ibexa\FieldTypeQuery;
 
-use Ibexa\Contracts\Core\Repository\ContentTypeService;
-use Ibexa\Contracts\Core\Repository\LocationService;
-use Ibexa\Contracts\Core\Repository\SearchService;
 use Ibexa\Contracts\Core\Repository\Values\Content\Content;
 use Ibexa\Contracts\Core\Repository\Values\Content\Location;
 use Ibexa\Contracts\Core\Repository\Values\Content\Query;
-use Ibexa\Contracts\Core\Repository\Values\Content\Search\SearchHit;
 use Ibexa\Contracts\Core\Repository\Values\ContentType\FieldDefinition;
 use Ibexa\Contracts\FieldTypeQuery\QueryFieldLocationService;
 use Ibexa\Contracts\FieldTypeQuery\QueryFieldServiceInterface;
 use Ibexa\Core\Base\Exceptions\InvalidArgumentException;
 use Ibexa\Core\Base\Exceptions\NotFoundException;
 use Ibexa\Core\QueryType\QueryTypeRegistry;
+use Ibexa\FieldTypeQuery\QueryExecutor\QueryExecutorStrategyRegistryInterface;
 use Symfony\Component\ExpressionLanguage\ExpressionLanguage;
 
 /**
@@ -26,44 +23,30 @@ use Symfony\Component\ExpressionLanguage\ExpressionLanguage;
  */
 final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldLocationService
 {
-    /** @var \Ibexa\Core\QueryType\QueryTypeRegistry */
-    private $queryTypeRegistry;
+    private QueryTypeRegistry $queryTypeRegistry;
 
-    /** @var \Ibexa\Contracts\Core\Repository\SearchService */
-    private $searchService;
-
-    /** @var \Ibexa\Contracts\Core\Repository\ContentTypeService */
-    private $contentTypeService;
-
-    /**
-     * @var \Ibexa\Contracts\Core\Repository\LocationService
-     */
-    private $locationService;
+    private QueryExecutorStrategyRegistryInterface $queryExecutorStrategyRegistry;
 
     public function __construct(
-        SearchService $searchService,
-        ContentTypeService $contentTypeService,
-        LocationService $locationService,
-        QueryTypeRegistry $queryTypeRegistry
+        QueryTypeRegistry $queryTypeRegistry,
+        QueryExecutorStrategyRegistryInterface $queryExecutorStrategyRegistry
     ) {
-        $this->searchService = $searchService;
-        $this->contentTypeService = $contentTypeService;
-        $this->locationService = $locationService;
         $this->queryTypeRegistry = $queryTypeRegistry;
+        $this->queryExecutorStrategyRegistry = $queryExecutorStrategyRegistry;
     }
 
     public function loadContentItems(Content $content, string $fieldDefinitionIdentifier): iterable
     {
         $query = $this->prepareQuery($content, $content->contentInfo->getMainLocation(), $fieldDefinitionIdentifier);
 
-        return $this->executeQueryAndMapResult($query);
+        return $this->queryExecutorStrategyRegistry->getStrategy($query)->findContentItems($query);
     }
 
     public function loadContentItemsForLocation(Location $location, string $fieldDefinitionIdentifier): iterable
     {
         $query = $this->prepareQuery($location->getContent(), $location, $fieldDefinitionIdentifier);
 
-        return $this->executeQueryAndMapResult($query);
+        return $this->queryExecutorStrategyRegistry->getStrategy($query)->findContentItems($query);
     }
 
     public function countContentItems(Content $content, string $fieldDefinitionIdentifier): int
@@ -71,9 +54,18 @@ final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldL
         $query = $this->prepareQuery($content, $content->contentInfo->getMainLocation(), $fieldDefinitionIdentifier);
         $query->limit = 0;
 
-        $count = $this->searchService->findContent($query)->totalCount - $query->offset;
+        return $this->countContentItemsForQuery($query);
+    }
 
-        return $count < 0 ? 0 : $count;
+    /**
+     * @throws \Ibexa\Contracts\Core\Repository\Exceptions\InvalidArgumentException
+     */
+    private function countContentItemsForQuery(Query $query): int
+    {
+        return max(
+            $this->queryExecutorStrategyRegistry->getStrategy($query)->countContentItems($query) - $query->offset,
+            0
+        );
     }
 
     public function countContentItemsForLocation(Location $location, string $fieldDefinitionIdentifier): int
@@ -81,9 +73,7 @@ final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldL
         $query = $this->prepareQuery($location->getContent(), $location, $fieldDefinitionIdentifier);
         $query->limit = 0;
 
-        $count = $this->searchService->findContent($query)->totalCount - $query->offset;
-
-        return $count < 0 ? 0 : $count;
+        return $this->countContentItemsForQuery($query);
     }
 
     public function loadContentItemsSlice(Content $content, string $fieldDefinitionIdentifier, int $offset, int $limit): iterable
@@ -92,7 +82,7 @@ final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldL
         $query->offset += $offset;
         $query->limit = $limit;
 
-        return $this->executeQueryAndMapResult($query);
+        return $this->queryExecutorStrategyRegistry->getStrategy($query)->findContentItems($query);
     }
 
     public function loadContentItemsSliceForLocation(Location $location, string $fieldDefinitionIdentifier, int $offset, int $limit): iterable
@@ -101,7 +91,7 @@ final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldL
         $query->offset += $offset;
         $query->limit = $limit;
 
-        return $this->executeQueryAndMapResult($query);
+        return $this->queryExecutorStrategyRegistry->getStrategy($query)->findContentItems($query);
     }
 
     public function getPaginationConfiguration(Content $content, string $fieldDefinitionIdentifier): int
@@ -177,7 +167,7 @@ final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldL
      */
     private function loadFieldDefinition(Content $content, string $fieldDefinitionIdentifier): FieldDefinition
     {
-        $contentType = $this->contentTypeService->loadContentType($content->contentInfo->contentTypeId);
+        $contentType = $content->getContentType();
         $fieldDefinition = $contentType->getFieldDefinition($fieldDefinitionIdentifier);
 
         if ($fieldDefinition === null) {
@@ -188,21 +178,6 @@ final class QueryFieldService implements QueryFieldServiceInterface, QueryFieldL
         }
 
         return $fieldDefinition;
-    }
-
-    /**
-     * @return \Ibexa\Contracts\Core\Repository\Values\Content\Content[]
-     *
-     * @throws \Ibexa\Contracts\Core\Repository\Exceptions\InvalidArgumentException
-     */
-    private function executeQueryAndMapResult(Query $query): array
-    {
-        return array_map(
-            static function (SearchHit $searchHit): Content {
-                return $searchHit->valueObject;
-            },
-            $this->searchService->findContent($query)->searchHits
-        );
     }
 }
 
